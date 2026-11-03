@@ -19,6 +19,7 @@ See `thorchain/` for the patch, setup and address list.
 
 | version | docker image |
 |---|---|
+| 1.135.2 | `docker.io/an0n0p3rat0r/mayanode:mainnet-1.135.2-filter@sha256:b452b2ee105163af93a56fe83b509a0af996fd68815ff74d4fe110b9957564e5` |
 
 See `maya/` for the patch, setup and address list.
 

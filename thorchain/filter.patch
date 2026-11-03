@@ -1,0 +1,674 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anonymous <anonymous@invalid>
+Date: Tue, 3 Nov 2026 14:28:24 +0000
+Subject: [PATCH] feat(bifrost): opt-in static inbound address filter
+
+Operators can list addresses under bifrost.address_filter (default off). The
+observer drops inbound observations whose sender is listed before they are
+signed or gossiped; outbound observations of our own vaults are untouched.
+
+The chain is inferred only from unambiguous, validated shapes: 0x + 40 hex
+(all EVM chains), BTC bc1 (valid mainnet bech32/bech32m) and BTC legacy
+(valid base58check with the mainnet P2PKH/P2SH version byte). Every other
+chain needs an explicit CHAIN:address entry. Unprefixed entries of any other
+shape, and bc1/legacy entries that fail checksum, are skipped and counted,
+never guessed onto a chain and never fatal. Dropped inbounds are counted per
+chain.
+---
+ bifrost/metrics/metrics.go                    |  12 ++
+ bifrost/observer/observe.go                   |  34 +++
+ bifrost/observer/observe_extra_test.go        |  58 +++++
+ bifrost/pkg/addressfilter/addressfilter.go    | 198 ++++++++++++++++++
+ .../pkg/addressfilter/addressfilter_test.go   | 188 +++++++++++++++++
+ config/config.go                              |  21 +-
+ config/default.yaml                           |   9 +
+ 7 files changed, 516 insertions(+), 4 deletions(-)
+ create mode 100644 bifrost/pkg/addressfilter/addressfilter.go
+ create mode 100644 bifrost/pkg/addressfilter/addressfilter_test.go
+
+diff --git a/bifrost/metrics/metrics.go b/bifrost/metrics/metrics.go
+index 67203a0eab2..eceaea57ae2 100644
+--- a/bifrost/metrics/metrics.go
++++ b/bifrost/metrics/metrics.go
+@@ -38,6 +38,10 @@ const (
+ 	ObserverError MetricName = `observer_error`
+ 	SignerError   MetricName = `signer_error`
+ 
++	// AddressFilterDropped counts inbound observations dropped by the static
++	// address filter (config key bifrost.address_filter).
++	AddressFilterDropped MetricName = `address_filter_dropped`
++
+ 	PubKeyManagerError MetricName = `pubkey_manager_error`
+ 
+ 	BatchSends      MetricName = `batch_sends`
+@@ -158,6 +162,14 @@ var (
+ 		}, []string{
+ 			"error_name", "additional",
+ 		}),
++		AddressFilterDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
++			Namespace: "observer",
++			Subsystem: "observer",
++			Name:      "address_filter_dropped_total",
++			Help:      "inbound observations dropped by the static address filter",
++		}, []string{
++			"chain",
++		}),
+ 		SignerError: prometheus.NewCounterVec(prometheus.CounterOpts{
+ 			Namespace: "signer",
+ 			Subsystem: "signer",
+diff --git a/bifrost/observer/observe.go b/bifrost/observer/observe.go
+index ccfc74b15bb..0d3761fcf75 100644
+--- a/bifrost/observer/observe.go
++++ b/bifrost/observer/observe.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/rs/zerolog/log"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/metrics"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/oracle"
++	"gitlab.com/thorchain/thornode/v3/bifrost/pkg/addressfilter"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/pkg/chainclients"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/pubkeymanager"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/thorclient"
+@@ -137,6 +138,11 @@ type Observer struct {
+ 	signedTxOutCacheMu sync.Mutex
+ 	attestationGossip  *AttestationGossip
+ 
++	// addressFilter is the opt-in static inbound address filter; nil when
++	// disabled, and Listed is nil-safe so zero-value Observers stay inert.
++	addressFilter        *addressfilter.Filter
++	addressFilterDropped *prometheus.CounterVec
++
+ 	observerWorkers int
+ 
+ 	lastNodeStatus    stypes.NodeStatus
+@@ -203,6 +209,17 @@ func NewObserver(pubkeyMgr *pubkeymanager.PubKeyManager,
+ 		return nil, fmt.Errorf("failed to create signed tx out cache: %w", err)
+ 	}
+ 
++	// Opt-in static inbound address filter (bifrost.address_filter). Inert
++	// unless enabled; unparseable entries are skipped, never fatal.
++	var addrFilter *addressfilter.Filter
++	if cfg.AddressFilter.Enabled {
++		addrFilter = addressfilter.New(cfg.AddressFilter.Addresses)
++		logger.Info().
++			Int("loaded", addrFilter.Loaded()).
++			Int("skipped", addrFilter.Skipped()).
++			Msg("address_filter enabled")
++	}
++
+ 	priceOracle, err := oracle.NewOracle(cfg)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("fail to create oracle instance: %w", err)
+@@ -232,6 +249,8 @@ func NewObserver(pubkeyMgr *pubkeymanager.PubKeyManager,
+ 		attestationGossip:     attestationGossip,
+ 		observerWorkers:       observerWorkers,
+ 		deckDumpFile:          deckDumpFile,
++		addressFilter:         addrFilter,
++		addressFilterDropped:  m.GetCounterVec(metrics.AddressFilterDropped),
+ 	}
+ 	if attestationGossip != nil {
+ 		// Register committed-event callbacks before Start launches the gossip
+@@ -1711,6 +1730,21 @@ func (o *Observer) filterObservations(chain common.Chain, items []*types.TxInIte
+ 		// for inbound message , if it is still in mempool , it will be ignored unless it is internal transaction
+ 		// internal tx means both from & to addresses belongs to the network. for example migrate/consolidate
+ 		if ok, cpi := poolAddress(txInItem.To); ok && (!memPool || isInternal) {
++			// Static address filter (bifrost.address_filter): drop inbounds
++			// from listed senders before they are signed or gossiped. Only the
++			// inbound branch is filtered — outbound observations are our own
++			// vaults' sends and must keep flowing for bookkeeping.
++			if o.addressFilter.Listed(chain, txInItem.Sender) {
++				if o.addressFilterDropped != nil {
++					o.addressFilterDropped.WithLabelValues(chain.String()).Inc()
++				}
++				o.logger.Warn().
++					Str("tx", txInItem.Tx).
++					Str("chain", chain.String()).
++					Str("sender", txInItem.Sender).
++					Msg("address_filter dropped")
++				continue
++			}
+ 			tx := txInItem.Copy()
+ 			tx.ObservedVaultPubKey = cpi.PubKey
+ 			txs = append(txs, tx)
+diff --git a/bifrost/observer/observe_extra_test.go b/bifrost/observer/observe_extra_test.go
+index 77c630855b9..7c45333d804 100644
+--- a/bifrost/observer/observe_extra_test.go
++++ b/bifrost/observer/observe_extra_test.go
+@@ -8,6 +8,7 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"os"
++	"strings"
+ 	"sync"
+ 	"testing"
+ 	"time"
+@@ -22,6 +23,7 @@ import (
+ 
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/metrics"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/p2p/conversion"
++	"gitlab.com/thorchain/thornode/v3/bifrost/pkg/addressfilter"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/pkg/chainclients"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/pubkeymanager"
+ 	"gitlab.com/thorchain/thornode/v3/bifrost/thorclient/types"
+@@ -191,6 +193,62 @@ func (s *ObserveExtraSuite) TestFilterObservations(c *C) {
+ 	c.Assert(len(result), Equals, 0)
+ }
+ 
++func (s *ObserveExtraSuite) TestFilterObservationsAddressFilter(c *C) {
++	vault := stypes.GetRandomPubKey()
++	btcVaultAddr, err := vault.GetAddress(common.BTCChain)
++	c.Assert(err, IsNil)
++	ethVaultAddr, err := vault.GetAddress(common.ETHChain)
++	c.Assert(err, IsNil)
++
++	cache, err := lru.New(100)
++	c.Assert(err, IsNil)
++	pkm, err := pubkeymanager.NewPubKeyManager(nil, nil)
++	c.Assert(err, IsNil)
++	pkm.AddPubKey(vault, false, common.SigningAlgoSecp256k1)
++
++	// Entries taken from a published sanctioned address list.
++	const (
++		listedBTC   = "bc1qjwdw6vrzq4vf6hckutvx4ucj86awwv99mxnz7w"
++		listedETH   = "0x007f2ca1d485ccCDF625C837FAC45b1B13107941"
++		cleanSender = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
++	)
++	inbound := func(tx, sender, to string) *types.TxInItem {
++		return &types.TxInItem{Tx: tx, Sender: sender, To: to, Memo: "SWAP:BTC.BTC"}
++	}
++
++	o := &Observer{
++		logger:           log.Logger,
++		pubkeyMgr:        pkm,
++		signedTxOutCache: cache,
++		addressFilter:    addressfilter.New(listedBTC + "," + listedETH),
++	}
++
++	// listed BTC sender -> dropped
++	result := o.filterObservations(common.BTCChain, []*types.TxInItem{inbound("tx1", listedBTC, btcVaultAddr.String())}, false)
++	c.Assert(result, HasLen, 0)
++
++	// non-listed sender -> observed
++	result = o.filterObservations(common.BTCChain, []*types.TxInItem{inbound("tx2", cleanSender, btcVaultAddr.String())}, false)
++	c.Assert(result, HasLen, 1)
++
++	// listed 0x sender -> dropped on EVM, case-insensitively
++	result = o.filterObservations(common.ETHChain, []*types.TxInItem{inbound("tx3", strings.ToLower(listedETH), ethVaultAddr.String())}, false)
++	c.Assert(result, HasLen, 0)
++
++	// the 0x entry does not leak onto non-EVM chains
++	result = o.filterObservations(common.BTCChain, []*types.TxInItem{inbound("tx4", listedETH, btcVaultAddr.String())}, false)
++	c.Assert(result, HasLen, 1)
++
++	// nil filter (feature disabled) -> same listed sender observed
++	oDisabled := &Observer{
++		logger:           log.Logger,
++		pubkeyMgr:        pkm,
++		signedTxOutCache: cache,
++	}
++	result = oDisabled.filterObservations(common.BTCChain, []*types.TxInItem{inbound("tx5", listedBTC, btcVaultAddr.String())}, false)
++	c.Assert(result, HasLen, 1)
++}
++
+ // ---------------------------------------------------------------------------
+ // processObservedTx tests (deduplication)
+ // ---------------------------------------------------------------------------
+diff --git a/bifrost/pkg/addressfilter/addressfilter.go b/bifrost/pkg/addressfilter/addressfilter.go
+new file mode 100644
+index 00000000000..5cd7d8923bb
+--- /dev/null
++++ b/bifrost/pkg/addressfilter/addressfilter.go
+@@ -0,0 +1,198 @@
++// Package addressfilter implements the opt-in static inbound address filter.
++//
++// Operators configure a comma-separated list of sanctioned addresses; the
++// observer drops any inbound observation whose sender is in the set, before
++// the observation is signed or gossiped. The filter only ever drops inbounds
++// — it never fabricates or rewrites observations — so a bad entry can
++// over-block but never corrupt state.
++//
++// The chain is inferred only from unambiguous, validated address shapes:
++//
++//	0x + 40 hex   -> all EVM chains (the same key controls a 0x address on
++//	                 every EVM chain, so one entry filters them all)
++//	bc1...        -> BTC segwit/taproot; must decode as a valid mainnet
++//	                 bech32/bech32m address (matched case-insensitively)
++//	1... / 3...   -> BTC legacy; must be valid base58check with the BTC
++//	                 mainnet P2PKH/P2SH version byte (exact match)
++//
++// Every other chain needs an explicit "CHAIN:address" entry (e.g. SOL:,
++// TRON:, DOGE:, LTC:). An unprefixed entry that matches none of the shapes
++// above is skipped and counted in Skipped, never guessed onto a chain: many
++// chains share base58 shapes, and a wrong guess would load an entry that can
++// never match.
++package addressfilter
++
++import (
++	"strings"
++
++	"github.com/btcsuite/btcd/chaincfg"
++	"github.com/btcsuite/btcutil"
++
++	"gitlab.com/thorchain/thornode/v3/common"
++)
++
++// evmBucket is the set shared by all EVM chains.
++const evmBucket = "EVM"
++
++// Filter is a static set of listed addresses. It is read-only after New and
++// safe for concurrent use. A nil *Filter is valid and matches nothing, which
++// keeps the feature fully inert when disabled.
++type Filter struct {
++	sets    map[string]map[string]struct{}
++	loaded  int
++	skipped int
++}
++
++// New parses a comma-separated address list. Unparseable entries are skipped
++// (and counted) rather than failing startup: a typo must not take down the
++// observer, only narrow the filter.
++func New(addresses string) *Filter {
++	f := &Filter{sets: map[string]map[string]struct{}{}}
++	for _, entry := range strings.Split(addresses, ",") {
++		entry = strings.TrimSpace(entry)
++		if entry == "" {
++			continue
++		}
++		bucket, addr, ok := classify(entry)
++		if !ok {
++			f.skipped++
++			continue
++		}
++		set := f.sets[bucket]
++		if set == nil {
++			set = map[string]struct{}{}
++			f.sets[bucket] = set
++		}
++		if _, dup := set[addr]; !dup {
++			set[addr] = struct{}{}
++			f.loaded++
++		}
++	}
++	return f
++}
++
++// knownChains is the set of chain tickers accepted in explicit "CHAIN:"
++// prefixes; a typo'd ticker (e.g. ETC for ETH) is skipped rather than
++// silently creating an inert bucket.
++var knownChains = func() map[string]bool {
++	m := make(map[string]bool, len(common.AllChains))
++	for _, c := range common.AllChains {
++		m[c.String()] = true
++	}
++	return m
++}()
++
++// classify returns the set bucket and normalized form for one config entry.
++func classify(entry string) (bucket, addr string, ok bool) {
++	// explicit "CHAIN:address" override
++	if ticker, rest, found := strings.Cut(entry, ":"); found && ticker != "" {
++		chain, err := common.NewChain(strings.ToUpper(ticker))
++		if err != nil || rest == "" || !knownChains[chain.String()] {
++			return "", "", false
++		}
++		return bucketForChain(chain), normalize(chain, rest), true
++	}
++	switch {
++	case len(entry) == 42 && strings.HasPrefix(entry, "0x") && isHex(entry[2:]):
++		return evmBucket, strings.ToLower(entry), true
++	case len(entry) >= 3 && strings.EqualFold(entry[:3], "bc1"):
++		lower := strings.ToLower(entry)
++		if !isBTCSegwit(lower) {
++			return "", "", false
++		}
++		return common.BTCChain.String(), lower, true
++	case len(entry) >= 26 && len(entry) <= 35 && (entry[0] == '1' || entry[0] == '3') && isBTCLegacy(entry):
++		return common.BTCChain.String(), entry, true
++	}
++	// anything else is ambiguous across chains and needs a "CHAIN:" prefix
++	return "", "", false
++}
++
++// isBTCSegwit reports whether s (lowercase) is a valid BTC mainnet segwit or
++// taproot address: correct "bc" HRP, bech32/bech32m checksum and witness
++// program. A typo fails the checksum and is skipped instead of loading an
++// entry that can never match.
++func isBTCSegwit(s string) bool {
++	addr, err := btcutil.DecodeAddress(s, &chaincfg.MainNetParams)
++	if err != nil || !addr.IsForNet(&chaincfg.MainNetParams) {
++		return false
++	}
++	switch addr.(type) {
++	case *btcutil.AddressWitnessPubKeyHash, *btcutil.AddressWitnessScriptHash, *btcutil.AddressTaproot:
++		return true
++	}
++	return false
++}
++
++// isBTCLegacy reports whether s is a valid base58check BTC mainnet P2PKH or
++// P2SH address. Other chains' base58 addresses (TRON, DOGE, LTC, SOL, ...)
++// fail the version-byte or checksum check.
++func isBTCLegacy(s string) bool {
++	addr, err := btcutil.DecodeAddress(s, &chaincfg.MainNetParams)
++	if err != nil || !addr.IsForNet(&chaincfg.MainNetParams) {
++		return false
++	}
++	switch addr.(type) {
++	case *btcutil.AddressPubKeyHash, *btcutil.AddressScriptHash:
++		return true
++	}
++	return false
++}
++
++// bucketForChain maps an explicit chain to its set, sharing one set across
++// EVM chains just like shape inference does.
++func bucketForChain(chain common.Chain) string {
++	if chain.IsEVM() {
++		return evmBucket
++	}
++	return chain.String()
++}
++
++// normalize applies the per-bucket comparison form: EVM and BTC bech32 match
++// case-insensitively (checksummed / mixed-case encodings), everything else is
++// exact.
++func normalize(chain common.Chain, addr string) string {
++	if chain.IsEVM() || (chain.Equals(common.BTCChain) && len(addr) >= 3 && strings.EqualFold(addr[:3], "bc1")) {
++		return strings.ToLower(addr)
++	}
++	return addr
++}
++
++// Listed reports whether address on chain is in the filter set.
++func (f *Filter) Listed(chain common.Chain, address string) bool {
++	if f == nil {
++		return false
++	}
++	set := f.sets[bucketForChain(chain)]
++	if set == nil {
++		return false
++	}
++	_, ok := set[normalize(chain, address)]
++	return ok
++}
++
++// Loaded returns the number of deduplicated entries in the set.
++func (f *Filter) Loaded() int {
++	if f == nil {
++		return 0
++	}
++	return f.loaded
++}
++
++// Skipped returns the number of config entries dropped as unparseable.
++func (f *Filter) Skipped() int {
++	if f == nil {
++		return 0
++	}
++	return f.skipped
++}
++
++func isHex(s string) bool {
++	for i := 0; i < len(s); i++ {
++		c := s[i]
++		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
++			return false
++		}
++	}
++	return len(s) > 0
++}
+diff --git a/bifrost/pkg/addressfilter/addressfilter_test.go b/bifrost/pkg/addressfilter/addressfilter_test.go
+new file mode 100644
+index 00000000000..f48537dd7b8
+--- /dev/null
++++ b/bifrost/pkg/addressfilter/addressfilter_test.go
+@@ -0,0 +1,188 @@
++package addressfilter
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/btcsuite/btcutil/base58"
++	. "gopkg.in/check.v1"
++
++	"gitlab.com/thorchain/thornode/v3/common"
++)
++
++func TestPackage(t *testing.T) { TestingT(t) }
++
++type AddressFilterSuite struct{}
++
++var _ = Suite(&AddressFilterSuite{})
++
++// Entries taken from a published sanctioned address list, plus a BTC legacy
++// vector (the genesis address).
++const (
++	seedETH    = "0x007f2ca1d485ccCDF625C837FAC45b1B13107941"
++	seedBech32 = "bc1qjwdw6vrzq4vf6hckutvx4ucj86awwv99mxnz7w"
++	seedSOL    = "AffzFDKZbyMiU11zmVBoAqD25ugpr7xoWWyRyGigBEaU"
++	legacyBTC  = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
++)
++
++func (s *AddressFilterSuite) TestParseCounts(c *C) {
++	f := New(strings.Join([]string{
++		seedETH, seedBech32, "SOL:" + seedSOL, legacyBTC,
++		seedETH,                   // duplicate, not double-counted
++		"  SOL:" + seedSOL + " ",  // whitespace tolerated
++		"not-an-address", "0x123", // garbage skipped
++		seedSOL, // bare non-BTC base58 is ambiguous: skipped
++		"",
++	}, ","))
++	c.Assert(f.Loaded(), Equals, 4)
++	c.Assert(f.Skipped(), Equals, 3)
++}
++
++func (s *AddressFilterSuite) TestEVMEntryAppliesToAllEVMChains(c *C) {
++	f := New(seedETH)
++	for _, chain := range common.GetEVMChains() {
++		c.Assert(f.Listed(chain, seedETH), Equals, true, Commentf("chain %s", chain))
++		// case-insensitive: lowercased query against checksummed entry
++		c.Assert(f.Listed(chain, strings.ToLower(seedETH)), Equals, true, Commentf("chain %s lower", chain))
++	}
++	// but not on non-EVM chains
++	c.Assert(f.Listed(common.BTCChain, seedETH), Equals, false)
++	c.Assert(f.Listed(common.SOLChain, seedETH), Equals, false)
++	c.Assert(f.Listed(common.GAIAChain, seedETH), Equals, false)
++}
++
++func (s *AddressFilterSuite) TestBTCMatching(c *C) {
++	f := New(seedBech32 + "," + legacyBTC)
++	// bech32 matches case-insensitively
++	c.Assert(f.Listed(common.BTCChain, seedBech32), Equals, true)
++	c.Assert(f.Listed(common.BTCChain, strings.ToUpper(seedBech32)), Equals, true)
++	// legacy matches exactly, and base58 case flips must NOT match
++	c.Assert(f.Listed(common.BTCChain, legacyBTC), Equals, true)
++	c.Assert(f.Listed(common.BTCChain, strings.ToUpper(legacyBTC)), Equals, false)
++	// not on other chains
++	c.Assert(f.Listed(common.SOLChain, seedBech32), Equals, false)
++	c.Assert(f.Listed(common.ETHChain, seedBech32), Equals, false)
++}
++
++func (s *AddressFilterSuite) TestSOLMatching(c *C) {
++	f := New("SOL:" + seedSOL)
++	c.Assert(f.Listed(common.SOLChain, seedSOL), Equals, true)
++	// base58 is case-sensitive
++	c.Assert(f.Listed(common.SOLChain, strings.ToLower(seedSOL)), Equals, false)
++	c.Assert(f.Listed(common.BTCChain, seedSOL), Equals, false)
++}
++
++func (s *AddressFilterSuite) TestExplicitChainPrefix(c *C) {
++	// inference: a valid BTC legacy address infers BTC
++	f := New(legacyBTC)
++	c.Assert(f.Listed(common.BTCChain, legacyBTC), Equals, true)
++	c.Assert(f.Listed(common.SOLChain, legacyBTC), Equals, false)
++
++	// explicit prefix overrides inference
++	f = New("SOL:" + legacyBTC)
++	c.Assert(f.Listed(common.SOLChain, legacyBTC), Equals, true)
++	c.Assert(f.Listed(common.BTCChain, legacyBTC), Equals, false)
++
++	// EVM prefix shares the EVM bucket
++	f = New("AVAX:" + seedETH)
++	for _, chain := range common.GetEVMChains() {
++		c.Assert(f.Listed(chain, seedETH), Equals, true, Commentf("chain %s", chain))
++	}
++
++	// unknown chain ticker is skipped, not fatal
++	f = New("FOO:" + seedETH)
++	c.Assert(f.Loaded(), Equals, 0)
++	c.Assert(f.Skipped(), Equals, 1)
++	c.Assert(f.Listed(common.ETHChain, seedETH), Equals, false)
++}
++
++func (s *AddressFilterSuite) TestInertFilter(c *C) {
++	// nil filter matches nothing (feature disabled)
++	var f *Filter
++	c.Assert(f.Listed(common.ETHChain, seedETH), Equals, false)
++	c.Assert(f.Loaded(), Equals, 0)
++	c.Assert(f.Skipped(), Equals, 0)
++
++	// empty config loads nothing
++	f = New("")
++	c.Assert(f.Loaded(), Equals, 0)
++	c.Assert(f.Listed(common.ETHChain, seedETH), Equals, false)
++}
++
++// base58check vectors for chains whose addresses share BTC's base58 alphabet
++// and lengths, built from a fixed 20-byte payload with each chain's mainnet
++// version byte.
++func altBase58(version byte) string {
++	payload := make([]byte, 20)
++	for i := range payload {
++		payload[i] = byte(i + 1)
++	}
++	return base58.CheckEncode(payload, version)
++}
++
++func (s *AddressFilterSuite) TestAmbiguousBase58Skipped(c *C) {
++	tron := altBase58(0x41) // T...
++	doge := altBase58(0x1e) // D...
++	ltc := altBase58(0x30)  // L...
++	c.Assert(tron[0], Equals, byte('T'))
++	c.Assert(doge[0], Equals, byte('D'))
++	c.Assert(ltc[0], Equals, byte('L'))
++
++	// bare: none is guessed onto any chain, all are counted as skipped
++	f := New(strings.Join([]string{tron, doge, ltc, seedSOL}, ","))
++	c.Assert(f.Loaded(), Equals, 0)
++	c.Assert(f.Skipped(), Equals, 4)
++	for _, addr := range []string{tron, doge, ltc, seedSOL} {
++		for _, chain := range []common.Chain{common.SOLChain, common.BTCChain, common.TRONChain, common.DOGEChain, common.LTCChain} {
++			c.Assert(f.Listed(chain, addr), Equals, false, Commentf("%s on %s", addr, chain))
++		}
++	}
++
++	// prefixed: loaded under the named chain only
++	f = New(strings.Join([]string{"TRON:" + tron, "DOGE:" + doge, "LTC:" + ltc, "SOL:" + seedSOL}, ","))
++	c.Assert(f.Loaded(), Equals, 4)
++	c.Assert(f.Skipped(), Equals, 0)
++	c.Assert(f.Listed(common.TRONChain, tron), Equals, true)
++	c.Assert(f.Listed(common.DOGEChain, doge), Equals, true)
++	c.Assert(f.Listed(common.LTCChain, ltc), Equals, true)
++	c.Assert(f.Listed(common.SOLChain, seedSOL), Equals, true)
++	c.Assert(f.Listed(common.SOLChain, tron), Equals, false)
++	c.Assert(f.Listed(common.BTCChain, doge), Equals, false)
++}
++
++func (s *AddressFilterSuite) TestBTCValidation(c *C) {
++	// valid legacy P2PKH and P2SH load
++	p2sh := altBase58(0x05)
++	c.Assert(p2sh[0], Equals, byte('3'))
++	f := New(legacyBTC + "," + p2sh)
++	c.Assert(f.Loaded(), Equals, 2)
++	c.Assert(f.Listed(common.BTCChain, p2sh), Equals, true)
++
++	// legacy-shaped but bad checksum: skipped
++	badLegacy := legacyBTC[:len(legacyBTC)-1] + "b"
++	f = New(badLegacy)
++	c.Assert(f.Loaded(), Equals, 0)
++	c.Assert(f.Skipped(), Equals, 1)
++
++	// bc1 with a bad checksum (one char changed): skipped
++	last := seedBech32[len(seedBech32)-1]
++	swap := byte('q')
++	if last == 'q' {
++		swap = 'p'
++	}
++	badBech32 := seedBech32[:len(seedBech32)-1] + string(swap)
++	f = New(badBech32)
++	c.Assert(f.Loaded(), Equals, 0)
++	c.Assert(f.Skipped(), Equals, 1)
++	c.Assert(f.Listed(common.BTCChain, badBech32), Equals, false)
++
++	// bc1 prefix with garbage, and a testnet address: skipped
++	f = New("bc1notanaddress,tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx")
++	c.Assert(f.Loaded(), Equals, 0)
++	c.Assert(f.Skipped(), Equals, 2)
++
++	// valid bc1 still loads, in either case
++	f = New(strings.ToUpper(seedBech32))
++	c.Assert(f.Loaded(), Equals, 1)
++	c.Assert(f.Listed(common.BTCChain, seedBech32), Equals, true)
++}
+diff --git a/config/config.go b/config/config.go
+index 7df724fbbc0..053be3e4097 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -658,6 +658,18 @@ type Thornode struct {
+ // Bifrost
+ // -------------------------------------------------------------------------------------
+ 
++// BifrostAddressFilterConfiguration is the opt-in static inbound address
++// filter. Addresses is a comma-separated list. The chain is inferred only for
++// validated EVM 0x (applies to all EVM chains) and BTC bc1/legacy entries;
++// every other chain needs an explicit "CHAIN:address" entry, and unprefixed
++// entries of any other shape are skipped. When enabled, the observer drops inbound
++// observations whose sender is listed. Env-overridable as
++// BIFROST_ADDRESS_FILTER_ENABLED / BIFROST_ADDRESS_FILTER_ADDRESSES.
++type BifrostAddressFilterConfiguration struct {
++	Enabled   bool   `mapstructure:"enabled"`
++	Addresses string `mapstructure:"addresses"`
++}
++
+ type Bifrost struct {
+ 	Signer            BifrostSignerConfiguration     `mapstructure:"signer"`
+ 	Thorchain         BifrostClientConfiguration     `mapstructure:"thorchain"`
+@@ -683,10 +695,11 @@ type Bifrost struct {
+ 		SUI   BifrostChainConfiguration `mapstructure:"sui"`
+ 		ADA   BifrostChainConfiguration `mapstructure:"ada"`
+ 	} `mapstructure:"chains"`
+-	TSS             BifrostTSSConfiguration    `mapstructure:"tss"`
+-	ObserverLevelDB LevelDBOptions             `mapstructure:"observer_leveldb"`
+-	ObserverWorkers int                        `mapstructure:"observer_workers"`
+-	Oracle          BifrostOracleConfiguration `mapstructure:"oracle"`
++	TSS             BifrostTSSConfiguration           `mapstructure:"tss"`
++	ObserverLevelDB LevelDBOptions                    `mapstructure:"observer_leveldb"`
++	ObserverWorkers int                               `mapstructure:"observer_workers"`
++	AddressFilter   BifrostAddressFilterConfiguration `mapstructure:"address_filter"`
++	Oracle          BifrostOracleConfiguration        `mapstructure:"oracle"`
+ 	Providers       struct {
+ 		Binance   BifrostOracleProviderConfiguration `mapstructure:"binance"`
+ 		Bitfinex  BifrostOracleProviderConfiguration `mapstructure:"bitfinex"`
+diff --git a/config/default.yaml b/config/default.yaml
+index b8ef80c26dd..d88a1d5a102 100644
+--- a/config/default.yaml
++++ b/config/default.yaml
+@@ -12,6 +12,15 @@ bifrost:
+     compact_on_init: false
+   observer_workers: 0
+ 
++  # Opt-in static inbound address filter (sanctioned address list).
++  # Comma-separated. Chain is inferred only for 0x (all EVM chains) and valid
++  # BTC bc1/legacy addresses; other chains need "CHAIN:address" (e.g. SOL:,
++  # TRON:). Unprefixed entries of any other shape are skipped. Disabled by
++  # default.
++  address_filter:
++    enabled: false
++    addresses: ""
++
+   metrics:
+     enabled: true
+     pprof_enabled: false
+-- 
+2.43.0
+

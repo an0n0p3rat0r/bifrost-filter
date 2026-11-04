@@ -1,4 +1,4 @@
-# Maya bifrost filter setup
+# Maya bifrost filter setup (1.135.3)
 
 ## 1) Go to the node folder
 
@@ -18,8 +18,8 @@ sed -i.bak '/coalesce .Values.global.hash .Values.image.hash/s/.*/{{- .Values.im
 bifrost:
   image:
     repository: docker.io/an0n0p3rat0r/mayanode
-    tag: mainnet-1.135.2-filter
-    hash: b452b2ee105163af93a56fe83b509a0af996fd68815ff74d4fe110b9957564e5
+    tag: mainnet-1.135.3-filter
+    hash: 5e2e731c48d0bf8e0036178e7ab0f4c438bf6c37ac56d4073f4bbcfb54d8adac
   env:
     # Filters
     BIFROST_ADDRESS_FILTER_ENABLED: "true"

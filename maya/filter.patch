@@ -1,32 +1,3 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Anonymous <anonymous@invalid>
-Date: Tue, 3 Nov 2026 14:34:37 +0000
-Subject: [PATCH] feat(bifrost): opt-in static inbound address filter
-
-Operators can list addresses under bifrost.address_filter (default off). The
-observer drops inbound observations whose sender is listed before they are
-signed or broadcast; outbound observations of our own vaults are untouched.
-
-The chain is inferred only from unambiguous, validated shapes: EVM 0x (all
-EVM chains), BTC bc1 (valid mainnet bech32/bech32m), BTC legacy, DASH and ZEC
-transparent (valid base58check with the chain's mainnet version bytes), and
-the THOR, KUJI, MAYA, XRD and ADA Shelley bech32 prefixes. Every other entry
-needs an explicit CHAIN:address prefix. Unprefixed entries of any other
-shape, entries that fail checksum or version checks, and entries for
-unsupported chains are skipped and counted, never guessed onto a chain and
-never fatal. Dropped inbounds are counted per chain.
----
- bifrost/metrics/metrics.go                    |  12 +
- bifrost/observer/observe.go                   |  62 +++-
- bifrost/observer/observe_test.go              |  67 +++++
- bifrost/pkg/addressfilter/addressfilter.go    | 268 ++++++++++++++++++
- .../pkg/addressfilter/addressfilter_test.go   | 230 +++++++++++++++
- config/config.go                              |  14 +
- config/default.yaml                           |   9 +
- 7 files changed, 648 insertions(+), 14 deletions(-)
- create mode 100644 bifrost/pkg/addressfilter/addressfilter.go
- create mode 100644 bifrost/pkg/addressfilter/addressfilter_test.go
-
 diff --git a/bifrost/metrics/metrics.go b/bifrost/metrics/metrics.go
 index 5f3f5bb90..ae9523494 100644
 --- a/bifrost/metrics/metrics.go
@@ -803,6 +774,3 @@ index 61bdf46b2..3733f6182 100644
    metrics:
      enabled: true
      pprof_enabled: false
--- 
-2.43.0
-

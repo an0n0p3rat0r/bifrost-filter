@@ -1,7 +1,7 @@
-diff --git a/bifrost/metrics/metrics.go b/bifrost/metrics/metrics.go
+diff --git bifrost/metrics/metrics.go bifrost/metrics/metrics.go
 index 5f3f5bb90..ae9523494 100644
---- a/bifrost/metrics/metrics.go
-+++ b/bifrost/metrics/metrics.go
+--- bifrost/metrics/metrics.go
++++ bifrost/metrics/metrics.go
 @@ -36,6 +36,10 @@ const (
  	ObserverError MetricName = `observer_error`
  	SignerError   MetricName = `signer_error`
@@ -28,10 +28,10 @@ index 5f3f5bb90..ae9523494 100644
  		SignerError: prometheus.NewCounterVec(prometheus.CounterOpts{
  			Namespace: "signer",
  			Subsystem: "signer",
-diff --git a/bifrost/observer/observe.go b/bifrost/observer/observe.go
+diff --git bifrost/observer/observe.go bifrost/observer/observe.go
 index 4f210270e..7e3d7e787 100644
---- a/bifrost/observer/observe.go
-+++ b/bifrost/observer/observe.go
+--- bifrost/observer/observe.go
++++ bifrost/observer/observe.go
 @@ -21,6 +21,7 @@ import (
  	"gitlab.com/mayachain/mayanode/bifrost/mayaclient"
  	"gitlab.com/mayachain/mayanode/bifrost/mayaclient/types"
@@ -127,10 +127,10 @@ index 4f210270e..7e3d7e787 100644
  			// If we already added this tx as outbound, we need to create a copy for the inbound
  			// to avoid pointer aliasing where both observations would share the same ObservedVaultPubKey
  			if outboundAdded {
-diff --git a/bifrost/observer/observe_test.go b/bifrost/observer/observe_test.go
+diff --git bifrost/observer/observe_test.go bifrost/observer/observe_test.go
 index f2bf59a93..c7907e4bc 100644
---- a/bifrost/observer/observe_test.go
-+++ b/bifrost/observer/observe_test.go
+--- bifrost/observer/observe_test.go
++++ bifrost/observer/observe_test.go
 @@ -29,6 +29,7 @@ import (
  	"gitlab.com/mayachain/mayanode/bifrost/mayaclient"
  	"gitlab.com/mayachain/mayanode/bifrost/mayaclient/types"
@@ -212,11 +212,11 @@ index f2bf59a93..c7907e4bc 100644
  type observerTestBridge struct {
  	mayaclient.MayachainBridge
  }
-diff --git a/bifrost/pkg/addressfilter/addressfilter.go b/bifrost/pkg/addressfilter/addressfilter.go
+diff --git bifrost/pkg/addressfilter/addressfilter.go bifrost/pkg/addressfilter/addressfilter.go
 new file mode 100644
 index 000000000..eafae0cc7
 --- /dev/null
-+++ b/bifrost/pkg/addressfilter/addressfilter.go
++++ bifrost/pkg/addressfilter/addressfilter.go
 @@ -0,0 +1,268 @@
 +// Package addressfilter implements the opt-in static inbound address filter.
 +//
@@ -486,11 +486,11 @@ index 000000000..eafae0cc7
 +	}
 +	return len(s) > 0
 +}
-diff --git a/bifrost/pkg/addressfilter/addressfilter_test.go b/bifrost/pkg/addressfilter/addressfilter_test.go
+diff --git bifrost/pkg/addressfilter/addressfilter_test.go bifrost/pkg/addressfilter/addressfilter_test.go
 new file mode 100644
 index 000000000..20118f703
 --- /dev/null
-+++ b/bifrost/pkg/addressfilter/addressfilter_test.go
++++ bifrost/pkg/addressfilter/addressfilter_test.go
 @@ -0,0 +1,230 @@
 +package addressfilter
 +
@@ -722,10 +722,10 @@ index 000000000..20118f703
 +	c.Assert(f.Loaded(), Equals, 1)
 +	c.Assert(f.Listed(common.BTCChain, seedBech32), Equals, true)
 +}
-diff --git a/config/config.go b/config/config.go
-index a9eb74467..56a04991c 100644
---- a/config/config.go
-+++ b/config/config.go
+diff --git config/config.go config/config.go
+index a19cc1bad..4ae87083f 100644
+--- config/config.go
++++ config/config.go
 @@ -580,6 +580,19 @@ type Thornode struct {
  // Bifrost
  // -------------------------------------------------------------------------------------
@@ -754,10 +754,10 @@ index a9eb74467..56a04991c 100644
  }
  
  type BifrostExInfoConfiguration struct {
-diff --git a/config/default.yaml b/config/default.yaml
-index 61bdf46b2..3733f6182 100644
---- a/config/default.yaml
-+++ b/config/default.yaml
+diff --git config/default.yaml config/default.yaml
+index 535cd2c96..434cb4fb1 100644
+--- config/default.yaml
++++ config/default.yaml
 @@ -11,6 +11,15 @@ bifrost:
      block_cache_capacity: 8388608
      compact_on_init: true

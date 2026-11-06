@@ -12,6 +12,7 @@ binaries swapped, the patch, and SHA256SUMS. Images are on Docker Hub.
 | version | docker image |
 |---|---|
 | 3.21.1 | `docker.io/an0n0p3rat0r/thornode:mainnet-3.21.1-filter@sha256:1f6f8d05f5e97d22fd04870e8d45fca4a3c0a39147b4e3aeb01534271a91b86f` |
+| 3.21.2 | `docker.io/an0n0p3rat0r/thornode:mainnet-3.21.2-filter@sha256:d5843ae44842ae3779ca7cfe64715dc6a48a801160bf5bb6cd67169494697444` |
 
 See `thorchain/` for the patch, setup and address list.
 

@@ -1,35 +1,6 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Anonymous <anonymous@invalid>
-Date: Tue, 3 Nov 2026 14:28:24 +0000
-Subject: [PATCH] feat(bifrost): opt-in static inbound address filter
-
-Operators can list addresses under bifrost.address_filter (default off). The
-observer drops inbound observations whose sender is listed before they are
-signed or gossiped; outbound observations of our own vaults are untouched.
-
-The chain is inferred only from unambiguous, validated shapes: 0x + 40 hex
-(all EVM chains), BTC bc1 (valid mainnet bech32/bech32m) and BTC legacy
-(valid base58check with the mainnet P2PKH/P2SH version byte). Every other
-chain needs an explicit CHAIN:address entry. Unprefixed entries of any other
-shape, and bc1/legacy entries that fail checksum, are skipped and counted,
-never guessed onto a chain and never fatal. Dropped inbounds are counted per
-chain.
----
- bifrost/metrics/metrics.go                    |  12 ++
- bifrost/observer/observe.go                   |  34 +++
- bifrost/observer/observe_extra_test.go        |  58 +++++
- bifrost/pkg/addressfilter/addressfilter.go    | 198 ++++++++++++++++++
- .../pkg/addressfilter/addressfilter_test.go   | 188 +++++++++++++++++
- config/config.go                              |  21 +-
- config/default.yaml                           |   9 +
- 7 files changed, 516 insertions(+), 4 deletions(-)
- create mode 100644 bifrost/pkg/addressfilter/addressfilter.go
- create mode 100644 bifrost/pkg/addressfilter/addressfilter_test.go
-
-diff --git a/bifrost/metrics/metrics.go b/bifrost/metrics/metrics.go
-index 67203a0eab2..eceaea57ae2 100644
---- a/bifrost/metrics/metrics.go
-+++ b/bifrost/metrics/metrics.go
+diff --git bifrost/metrics/metrics.go bifrost/metrics/metrics.go
+--- bifrost/metrics/metrics.go
++++ bifrost/metrics/metrics.go
 @@ -38,6 +38,10 @@ const (
  	ObserverError MetricName = `observer_error`
  	SignerError   MetricName = `signer_error`
@@ -56,11 +27,10 @@ index 67203a0eab2..eceaea57ae2 100644
  		SignerError: prometheus.NewCounterVec(prometheus.CounterOpts{
  			Namespace: "signer",
  			Subsystem: "signer",
-diff --git a/bifrost/observer/observe.go b/bifrost/observer/observe.go
-index ccfc74b15bb..0d3761fcf75 100644
---- a/bifrost/observer/observe.go
-+++ b/bifrost/observer/observe.go
-@@ -20,6 +20,7 @@ import (
+diff --git bifrost/observer/observe.go bifrost/observer/observe.go
+--- bifrost/observer/observe.go
++++ bifrost/observer/observe.go
+@@ -21,6 +21,7 @@ import (
  	"github.com/rs/zerolog/log"
  	"gitlab.com/thorchain/thornode/v3/bifrost/metrics"
  	"gitlab.com/thorchain/thornode/v3/bifrost/oracle"
@@ -68,9 +38,9 @@ index ccfc74b15bb..0d3761fcf75 100644
  	"gitlab.com/thorchain/thornode/v3/bifrost/pkg/chainclients"
  	"gitlab.com/thorchain/thornode/v3/bifrost/pubkeymanager"
  	"gitlab.com/thorchain/thornode/v3/bifrost/thorclient"
-@@ -137,6 +138,11 @@ type Observer struct {
- 	signedTxOutCacheMu sync.Mutex
- 	attestationGossip  *AttestationGossip
+@@ -178,6 +179,11 @@ type Observer struct {
+ 	settledOutbounds         *lru.Cache
+ 	attestationGossip        *AttestationGossip
  
 +	// addressFilter is the opt-in static inbound address filter; nil when
 +	// disabled, and Listed is nil-safe so zero-value Observers stay inert.
@@ -80,8 +50,8 @@ index ccfc74b15bb..0d3761fcf75 100644
  	observerWorkers int
  
  	lastNodeStatus    stypes.NodeStatus
-@@ -203,6 +209,17 @@ func NewObserver(pubkeyMgr *pubkeymanager.PubKeyManager,
- 		return nil, fmt.Errorf("failed to create signed tx out cache: %w", err)
+@@ -256,6 +262,17 @@ func NewObserver(pubkeyMgr *pubkeymanager.PubKeyManager,
+ 		return nil, fmt.Errorf("failed to create settled outbound cache: %w", err)
  	}
  
 +	// Opt-in static inbound address filter (bifrost.address_filter). Inert
@@ -98,16 +68,16 @@ index ccfc74b15bb..0d3761fcf75 100644
  	priceOracle, err := oracle.NewOracle(cfg)
  	if err != nil {
  		return nil, fmt.Errorf("fail to create oracle instance: %w", err)
-@@ -232,6 +249,8 @@ func NewObserver(pubkeyMgr *pubkeymanager.PubKeyManager,
- 		attestationGossip:     attestationGossip,
- 		observerWorkers:       observerWorkers,
- 		deckDumpFile:          deckDumpFile,
-+		addressFilter:         addrFilter,
-+		addressFilterDropped:  m.GetCounterVec(metrics.AddressFilterDropped),
+@@ -289,6 +306,8 @@ func NewObserver(pubkeyMgr *pubkeymanager.PubKeyManager,
+ 		attestationGossip:       attestationGossip,
+ 		observerWorkers:         observerWorkers,
+ 		deckDumpFile:            deckDumpFile,
++		addressFilter:           addrFilter,
++		addressFilterDropped:    m.GetCounterVec(metrics.AddressFilterDropped),
  	}
  	if attestationGossip != nil {
  		// Register committed-event callbacks before Start launches the gossip
-@@ -1711,6 +1730,21 @@ func (o *Observer) filterObservations(chain common.Chain, items []*types.TxInIte
+@@ -2420,6 +2439,21 @@ func (o *Observer) filterObservations(chain common.Chain, items []*types.TxInIte
  		// for inbound message , if it is still in mempool , it will be ignored unless it is internal transaction
  		// internal tx means both from & to addresses belongs to the network. for example migrate/consolidate
  		if ok, cpi := poolAddress(txInItem.To); ok && (!memPool || isInternal) {
@@ -129,10 +99,9 @@ index ccfc74b15bb..0d3761fcf75 100644
  			tx := txInItem.Copy()
  			tx.ObservedVaultPubKey = cpi.PubKey
  			txs = append(txs, tx)
-diff --git a/bifrost/observer/observe_extra_test.go b/bifrost/observer/observe_extra_test.go
-index 77c630855b9..7c45333d804 100644
---- a/bifrost/observer/observe_extra_test.go
-+++ b/bifrost/observer/observe_extra_test.go
+diff --git bifrost/observer/observe_extra_test.go bifrost/observer/observe_extra_test.go
+--- bifrost/observer/observe_extra_test.go
++++ bifrost/observer/observe_extra_test.go
 @@ -8,6 +8,7 @@ import (
  	"fmt"
  	"io"
@@ -212,11 +181,10 @@ index 77c630855b9..7c45333d804 100644
  // ---------------------------------------------------------------------------
  // processObservedTx tests (deduplication)
  // ---------------------------------------------------------------------------
-diff --git a/bifrost/pkg/addressfilter/addressfilter.go b/bifrost/pkg/addressfilter/addressfilter.go
+diff --git bifrost/pkg/addressfilter/addressfilter.go bifrost/pkg/addressfilter/addressfilter.go
 new file mode 100644
-index 00000000000..5cd7d8923bb
 --- /dev/null
-+++ b/bifrost/pkg/addressfilter/addressfilter.go
++++ bifrost/pkg/addressfilter/addressfilter.go
 @@ -0,0 +1,198 @@
 +// Package addressfilter implements the opt-in static inbound address filter.
 +//
@@ -416,11 +384,10 @@ index 00000000000..5cd7d8923bb
 +	}
 +	return len(s) > 0
 +}
-diff --git a/bifrost/pkg/addressfilter/addressfilter_test.go b/bifrost/pkg/addressfilter/addressfilter_test.go
+diff --git bifrost/pkg/addressfilter/addressfilter_test.go bifrost/pkg/addressfilter/addressfilter_test.go
 new file mode 100644
-index 00000000000..f48537dd7b8
 --- /dev/null
-+++ b/bifrost/pkg/addressfilter/addressfilter_test.go
++++ bifrost/pkg/addressfilter/addressfilter_test.go
 @@ -0,0 +1,188 @@
 +package addressfilter
 +
@@ -610,10 +577,9 @@ index 00000000000..f48537dd7b8
 +	c.Assert(f.Loaded(), Equals, 1)
 +	c.Assert(f.Listed(common.BTCChain, seedBech32), Equals, true)
 +}
-diff --git a/config/config.go b/config/config.go
-index 7df724fbbc0..053be3e4097 100644
---- a/config/config.go
-+++ b/config/config.go
+diff --git config/config.go config/config.go
+--- config/config.go
++++ config/config.go
 @@ -658,6 +658,18 @@ type Thornode struct {
  // Bifrost
  // -------------------------------------------------------------------------------------
@@ -649,10 +615,9 @@ index 7df724fbbc0..053be3e4097 100644
  	Providers       struct {
  		Binance   BifrostOracleProviderConfiguration `mapstructure:"binance"`
  		Bitfinex  BifrostOracleProviderConfiguration `mapstructure:"bitfinex"`
-diff --git a/config/default.yaml b/config/default.yaml
-index b8ef80c26dd..d88a1d5a102 100644
---- a/config/default.yaml
-+++ b/config/default.yaml
+diff --git config/default.yaml config/default.yaml
+--- config/default.yaml
++++ config/default.yaml
 @@ -12,6 +12,15 @@ bifrost:
      compact_on_init: false
    observer_workers: 0
@@ -669,6 +634,3 @@ index b8ef80c26dd..d88a1d5a102 100644
    metrics:
      enabled: true
      pprof_enabled: false
--- 
-2.43.0
-

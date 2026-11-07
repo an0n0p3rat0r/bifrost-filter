@@ -15,7 +15,8 @@ binaries swapped, the patch, and SHA256SUMS. Images are on Docker Hub.
 | 3.21.2 | `docker.io/an0n0p3rat0r/thornode:mainnet-3.21.2-filter@sha256:d5843ae44842ae3779ca7cfe64715dc6a48a801160bf5bb6cd67169494697444` |
 | 3.21.3 | `docker.io/an0n0p3rat0r/thornode:mainnet-3.21.3-filter@sha256:ac2159aab14efd4c01c56cdaa0de7003166b67476a0e737bdd1df4aa95bd17d0` |
 
-See `thorchain/` for the patch, setup and address list.
+Address list: [thorchain/fbi-wallet-address-list-tc.txt](thorchain/fbi-wallet-address-list-tc.txt).
+See `thorchain/` for the patch and setup.
 
 ## MAYAChain
 
@@ -25,5 +26,6 @@ See `thorchain/` for the patch, setup and address list.
 | 1.135.3 | `docker.io/an0n0p3rat0r/mayanode:mainnet-1.135.3-filter@sha256:5e2e731c48d0bf8e0036178e7ab0f4c438bf6c37ac56d4073f4bbcfb54d8adac` |
 | 1.135.4 | `docker.io/an0n0p3rat0r/mayanode:mainnet-1.135.4-filter@sha256:1172ceeedd2cdd34be74cbb66ec2634161cfce32529b23779b561e1664c2560d` |
 
-See `maya/` for the patch, setup and address list.
+Address list: [maya/fbi-wallet-address-list-maya.txt](maya/fbi-wallet-address-list-maya.txt).
+See `maya/` for the patch and setup.
 

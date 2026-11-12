@@ -1,4 +1,4 @@
-# THORChain bifrost filter setup (3.21.3)
+# THORChain bifrost filter setup (3.21.4)
 
 ## 1) Go to the node folder
 
@@ -12,14 +12,14 @@ cd ~/<node>/node-launcher
 nano thornode-stack/mainnet.yaml
 ```
 
-edit new 3.21.3 bifrost image:
+edit new 3.21.4 bifrost image:
 
 ```yaml
     - height: 28366100
-      image: registry.gitlab.com/thorchain/thornode:mainnet-3.21.3@sha256:9f46da91327a15461f53e0d8ed2d289a0e7b562e4a552172c3e94ec99002d11c
+      image: registry.gitlab.com/thorchain/thornode:mainnet-3.21.4@sha256:3be00fc4b3fc7dcaec18cfe0f5524bba476026302b8a356a34825ff21b9fbfb2
       containers:
-        #bifrost: registry.gitlab.com/thorchain/thornode:mainnet-3.21.3@sha256:9f46da91327a15461f53e0d8ed2d289a0e7b562e4a552172c3e94ec99002d11c
-        bifrost: docker.io/an0n0p3rat0r/thornode:mainnet-3.21.3-filter@sha256:ac2159aab14efd4c01c56cdaa0de7003166b67476a0e737bdd1df4aa95bd17d0
+        #bifrost: registry.gitlab.com/thorchain/thornode:mainnet-3.21.4@sha256:3be00fc4b3fc7dcaec18cfe0f5524bba476026302b8a356a34825ff21b9fbfb2
+        bifrost: docker.io/an0n0p3rat0r/thornode:mainnet-3.21.4-filter@sha256:cdb0ae8b97403a105990120ecf1c9e1fbd2c770445e200bdf17c2cada8306f7f
 ```
 
 ## 3) Add/edit the following values in `thornode-stack/mainnet.yaml`

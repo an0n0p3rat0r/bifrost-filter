@@ -14,6 +14,7 @@ binaries swapped, the patch, and SHA256SUMS. Images are on Docker Hub.
 | 3.21.1 | `docker.io/an0n0p3rat0r/thornode:mainnet-3.21.1-filter@sha256:1f6f8d05f5e97d22fd04870e8d45fca4a3c0a39147b4e3aeb01534271a91b86f` |
 | 3.21.2 | `docker.io/an0n0p3rat0r/thornode:mainnet-3.21.2-filter@sha256:d5843ae44842ae3779ca7cfe64715dc6a48a801160bf5bb6cd67169494697444` |
 | 3.21.3 | `docker.io/an0n0p3rat0r/thornode:mainnet-3.21.3-filter@sha256:ac2159aab14efd4c01c56cdaa0de7003166b67476a0e737bdd1df4aa95bd17d0` |
+| 3.21.4 | `docker.io/an0n0p3rat0r/thornode:mainnet-3.21.4-filter@sha256:cdb0ae8b97403a105990120ecf1c9e1fbd2c770445e200bdf17c2cada8306f7f` |
 
 Address list: [thorchain/fbi-wallet-address-list-tc.txt](thorchain/fbi-wallet-address-list-tc.txt).
 See `thorchain/` for the patch and setup.

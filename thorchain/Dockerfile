@@ -1,2 +1,2 @@
-FROM registry.gitlab.com/thorchain/thornode:mainnet-3.21.3@sha256:9f46da91327a15461f53e0d8ed2d289a0e7b562e4a552172c3e94ec99002d11c
+FROM registry.gitlab.com/thorchain/thornode:mainnet-3.21.4@sha256:3be00fc4b3fc7dcaec18cfe0f5524bba476026302b8a356a34825ff21b9fbfb2
 COPY --chmod=0755 thornode bifrost /usr/bin/

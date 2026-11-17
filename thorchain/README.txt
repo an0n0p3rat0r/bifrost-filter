@@ -1,21 +1,21 @@
-thornode 3.21.4 filtering build (opt-in, bifrost only)
+thornode 3.21.5 filtering build (opt-in, bifrost only)
 
-Base:     thornode 3.21.4 release, commit 1d4ba603d05cec1f01c1b6a7d894423257b559b5
-Patch:    filtering-3.21.4.patch (plain unified diff, applies with -p0)
+Base:     thornode 3.21.5 release, commit 59c58ecc15d5430db269b97a3d8af79ab7aa9afb
+Patch:    filtering-3.21.5.patch (plain unified diff, applies with -p0)
 Build:    linux/amd64, static (musl, static-pie), tags mainnet,muslc, garbled like
           the official release binaries. `thornode version --long` reports the
           base commit above.
-Files:    thornode, bifrost, Dockerfile, filtering-3.21.4.patch, SHA256SUMS
+Files:    thornode, bifrost, Dockerfile, filtering-3.21.5.patch, SHA256SUMS
 
 Verify:
   sha256sum -c SHA256SUMS
 
-Docker (official 3.21.4 image, only the two binaries replaced):
-  docker build -t thornode:mainnet-3.21.4-filtering .
+Docker (official 3.21.5 image, only the two binaries replaced):
+  docker build -t thornode:mainnet-3.21.5-filtering .
 
 Rebuild from source instead (optional):
-  git checkout 1d4ba603d05cec1f01c1b6a7d894423257b559b5
-  git apply -p0 filtering-3.21.4.patch
+  git checkout 59c58ecc15d5430db269b97a3d8af79ab7aa9afb
+  git apply -p0 filtering-3.21.5.patch
 
 Filtering (OFF by default; only bifrost changes). The config keys keep the
 names used in the code:

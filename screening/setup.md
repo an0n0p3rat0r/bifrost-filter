@@ -23,7 +23,7 @@ gjallar:
   image:
     name: docker.io/an0n0p3rat0r/gjallar
     tag: 0.1.0-ca04ded
-    hash: 65cb72553466561b5c19dfd5a759eb5c7d032eaa7d4d89b5496b31f5a62ab6f3
+    hash: 3ab4d05f0035e96a70837cf9d44b338f56dae535e3cc1de7e8db9372a4b93236
 ```
 
 Mounts: `gjallar.toml` at `/etc/gjallar/gjallar.toml`, TLS at `/etc/gjallar/tls`, data at `/var/lib/gjallar`.

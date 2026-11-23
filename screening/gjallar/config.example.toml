@@ -1,0 +1,73 @@
+# Example configuration. All values are synthetic; replace hosts and env names for a deployment.
+data_dir = "/var/lib/gjallar"
+
+[server]
+bind = "0.0.0.0:8443"
+admin_bind = "127.0.0.1:9443"     # admin surface stays on loopback
+request_deadline_ms = 1500         # must stay below the client's 2 s timeout
+max_vendor_items = 1000
+# Connection bounds per listener. Firewall the node port to the validators that query it;
+# these limits keep one peer from starving the rest, not a botnet.
+max_connections = 256              # established (after TLS); lowered at start to fit LimitNOFILE
+max_connections_per_peer = 32      # IPv6 peers count per /64
+max_tls_handshakes = 256           # handshakes in progress; they don't take connection slots
+max_tls_handshakes_per_peer = 8    # handshakes one peer (IPv6 /64) may hold; no LB/NAT in front
+http2 = false                      # on: HTTP/2 clients can hold connections with PINGs alone
+idle_timeout_secs = 60             # idle keep-alive lasts this long
+header_read_timeout_secs = 10      # a request head must arrive this fast once it starts
+
+# A non-loopback bind needs TLS (startup refuses otherwise). Both listeners use it.
+[server.tls]
+cert_path = "/etc/gjallar/tls/cert.pem"
+key_path = "/etc/gjallar/tls/key.pem"
+
+[server.auth]
+modes = ["token"]
+# tokens = [{ principal = "operator-a", sha256 = "<sha256 hex of the token>" }]
+
+[thorchain]
+rest_url = "https://thorchain-api.example.org"
+rpc_url = "https://thorchain-rpc.example.org"
+confirm_url = "https://second-provider.example.net"   # must be a different host
+api_key_env = "GJALLAR_THORCHAIN_API_KEY"
+fresh_blocks = 10
+backstop_poll_secs = 60
+confirm_within_secs = 120
+
+[vendor]
+kind = "none"            # "elliptic" needs key_env and secret_env
+call_timeout_ms = 20000
+concurrency = 16
+calls_per_min = 600
+daily_cap = 50000
+high_value_reserve_pct = 30
+listed_if_score_gte = 5.0
+
+[cache]
+clean_ttl_secs = 300
+risky_ttl_secs = 604800    # risky verdicts are also kept in main.db and survive a restart
+unverified_ttl_secs = 60
+
+[health]
+strict_health = false        # true: /healthz answers 503 while tier 2 is down
+unverified_ratio_max = 0.5   # degraded above this share of vendor-side unverified answers
+unverified_window_secs = 300
+unverified_min_answers = 50
+
+# OFAC SDN: the CSV export (the parser reads the SDN.CSV remarks format, not the XML), plus
+# its overflow file. Remarks longer than the SDN.CSV field continue in SDN_COMMENTS.CSV, cut
+# mid-text; about half the SDN digital currency addresses are only there. Both URLs answer
+# with a redirect to a presigned S3 object on the host in redirect_hosts.
+[[source]]
+id = "sdn"
+kind = "ofac"
+url = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV"
+overflow_url = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_COMMENTS.CSV"
+redirect_hosts = ["wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com"]
+hops = 0
+
+[[source]]
+id = "example-fixed"
+kind = "fixed"
+hops = 0
+addresses = [{ chain = "ETH", address = "0x0000000000000000000000000000000000000001" }]

@@ -1,0 +1,784 @@
+diff --git a/gjallar/Chart.yaml b/gjallar/Chart.yaml
+new file mode 100644
+index 00000000..3add27da
+--- /dev/null
++++ b/gjallar/Chart.yaml
+@@ -0,0 +1,7 @@
++apiVersion: v2
++name: gjallar
++description: Optional Gjallar screening proxy that bifrost's observation filter queries (per-node inbound screening)
++type: application
++version: 0.1.0
++
++appVersion: "0.1.0"
+diff --git a/gjallar/README.md b/gjallar/README.md
+new file mode 100644
+index 00000000..b6cc35ac
+--- /dev/null
++++ b/gjallar/README.md
+@@ -0,0 +1,72 @@
++# Gjallar screening proxy for the bifrost observation filter
++
++Optional, off by default. Runs Gjallar next to bifrost. Gjallar is a screening service that answers "is this sender on the operator's screening list?" Bifrost's opt-in observation filter queries it and skips observing an inbound whose sender is listed. This is a per-node policy: no consensus or economic change, and a node that filters simply does not sign that observation.
++
++## What Gjallar does
++
++Every address is answered in fixed tiers, stopping at the first that applies:
++
++1. **Vault whitelist.** Every Asgard vault address (all states), router and module account is never listed. Gjallar builds this from keygen and vault-rotation events plus Midgard history, independently of bifrost's own vault guard.
++2. **Own list.** Versioned sets built from the configured sources (OFAC SDN, CSV, JSON, web pages, fixed lists), optionally extended by bounded N-hop derivation.
++3. **Screening vendor on a miss.** Optional, cached, budgeted.
++
++It **fails open**: if it cannot answer in time, the answer is "not listed" and the node observes as it does today.
++
++Bifrost can use it in two modes (both supported by the screening adapter):
++
++- `list`: bifrost pulls `GET /v1/list/{chain}` (the exportable own list) every `refresh` and matches locally. This is the default here: no per-block call, and a Gjallar outage leaves the last good list in place until `max_age`.
++- `query`: bifrost sends each block's senders to `POST /v1/check`.
++
++## Enable
++
++In your thornode-stack values:
++
++```yaml
++gjallar:
++  enabled: true
++  image:
++    name: <registry>/gjallar
++    tag: <tag>
++    hash: <sha256 digest, no prefix>
++  tls:
++    secretName: gjallar-tls          # kubernetes.io/tls, valid for "gjallar"
++  thorchainApiKey:                   # optional
++    secretName: gjallar-env
++    secretKey: thorchain-api-key
++  config:
++    server:
++      auth:
++        cidrs:
++          - principal: bifrost
++            cidr: <pod CIDR>         # keep networkPolicy on: it limits the port to bifrost
++    thorchain:
++      rest_url: https://<thorchain api provider>
++      rpc_url: https://<thorchain rpc provider>
++      confirm_url: https://<a second provider, different host>
++
++thornode:
++  bifrost:
++    screening:
++      enabled: true
++      caSecret: gjallar-ca           # Secret with ca.crt that issued gjallar-tls
++```
++
++Bifrost must run an image built with the screening adapter. A stock bifrost ignores the `BIFROST_ADDRESS_FILTER_*` keys.
++
++### Requirements
++
++- **TLS is mandatory.** Gjallar refuses a non-loopback bind without TLS. Create a CA, issue a certificate for `gjallar` and `gjallar.<namespace>.svc`, and store it as a `kubernetes.io/tls` Secret. Put the CA in a Secret with key `ca.crt` for bifrost.
++- **THORChain endpoints must be https.** The in-cluster thornode service is plain http, so it does not qualify. `confirm_url` must be on a different host from `rest_url`.
++- **Image.** There is no official image yet. Build one from the Gjallar source with the `gjallar` binary as the entrypoint (the chart passes `serve /etc/gjallar/gjallar.toml`).
++- **One pod.** The list, snapshots and vault whitelist live in one data dir on the PVC, so the deployment runs one replica with a `Recreate` strategy.
++
++## Config
++
++`gjallar.config` mirrors `gjallar.toml` (see `config.example.toml` and `API.md` in the Gjallar source). The chart owns `data_dir`, `server.bind`, `server.admin_bind`, the TLS paths and `thorchain.api_key_env`. Sources go under `config.source` as a list; each entry becomes a `[[source]]` table.
++
++The admin listener (`/v1/version`, `/metrics`, `/healthz/detail`) stays on loopback inside the pod. Use `kubectl port-forward` or `kubectl exec` to reach it.
++
++## Behaviour to know before enabling
++
++- **Missed observations.** A filtering node does not sign listed inbounds. While fewer than 1/3 of active nodes filter, those inbounds still reach 2/3 and are processed without them, and the node accrues the normal missed-observation slash points.
++- **`filterOutbound: true`** also refuses to sign outbounds to a listed destination. Expect failed keysigns and jail for the node whenever it is selected for one.
+diff --git a/gjallar/templates/_helpers.tpl b/gjallar/templates/_helpers.tpl
+new file mode 100644
+index 00000000..77d91d8e
+--- /dev/null
++++ b/gjallar/templates/_helpers.tpl
+@@ -0,0 +1,156 @@
++{{/* vim: set filetype=mustache: */}}
++
++{{/*
++Expand the name of the chart.
++*/}}
++{{- define "gjallar.name" -}}
++{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
++{{- end }}
++
++{{/*
++Create a default fully qualified app name.
++We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
++If release name contains chart name it will be used as a full name.
++*/}}
++{{- define "gjallar.fullname" -}}
++{{- if .Values.fullnameOverride }}
++{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
++{{- else }}
++{{- $name := default .Chart.Name .Values.nameOverride }}
++{{- if contains $name .Release.Name }}
++{{- .Release.Name | trunc 63 | trimSuffix "-" }}
++{{- else }}
++{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
++{{- end }}
++{{- end }}
++{{- end }}
++
++{{/*
++Create chart name and version as used by the chart label.
++*/}}
++{{- define "gjallar.chart" -}}
++{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
++{{- end }}
++
++{{/*
++Common labels
++*/}}
++{{- define "gjallar.labels" -}}
++helm.sh/chart: {{ include "gjallar.chart" . }}
++{{ include "gjallar.selectorLabels" . }}
++app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
++app.kubernetes.io/managed-by: {{ .Release.Service }}
++{{- end }}
++
++{{/*
++Selector labels
++*/}}
++{{- define "gjallar.selectorLabels" -}}
++app.kubernetes.io/name: {{ include "gjallar.name" . }}
++app.kubernetes.io/instance: {{ .Release.Name }}
++{{- end }}
++
++{{/*
++Container securityContext. Rendered by hand so the capabilities lists come out as indented
++block sequences (yamllint-clean); toYaml would emit them unindented.
++*/}}
++{{- define "gjallar.containerSecurityContext" -}}
++{{- with omit .Values.securityContext "capabilities" }}{{ toYaml . }}{{ end }}
++{{- with .Values.securityContext.capabilities }}
++capabilities:
++  {{- range $key, $list := . }}
++  {{ $key }}:
++    {{- range $list }}
++    - {{ . | quote }}
++    {{- end }}
++  {{- end }}
++{{- end }}
++{{- end }}
++
++{{/*
++gjallar.toml rendering. Helm's toToml writes every number as a float (1500.0), which Gjallar's
++integer fields reject, so the config is rendered by hand: whole numbers as integers, maps as
++[tables], `source` entries as [[source]], maps and lists inside a value as inline TOML.
++Keys with a null value are skipped.
++*/}}
++{{- define "gjallar.tomlKey" -}}
++{{- if regexMatch "^[A-Za-z0-9_-]+$" . }}{{ . }}{{ else }}{{ . | toJson }}{{ end }}
++{{- end }}
++
++{{- define "gjallar.tomlValue" -}}
++{{- $v := . -}}
++{{- if kindIs "string" $v -}}
++{{ $v | toJson }}
++{{- else if kindIs "bool" $v -}}
++{{ $v }}
++{{- else if or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v) -}}
++{{- if eq (float64 (int64 $v)) (float64 $v) }}{{ int64 $v }}{{ else }}{{ $v }}{{ end }}
++{{- else if kindIs "slice" $v -}}
++[{{ range $i, $e := $v }}{{ if $i }}, {{ end }}{{ include "gjallar.tomlValue" $e }}{{ end }}]
++{{- else if kindIs "map" $v -}}
++{ {{- $first := true }}{{ range $k := keys $v | sortAlpha }}{{ $e := get $v $k }}{{ if not (kindIs "invalid" $e) }}{{ if not $first }},{{ end }} {{ include "gjallar.tomlKey" $k }} = {{ include "gjallar.tomlValue" $e }}{{ $first = false }}{{ end }}{{ end }} }
++{{- else -}}
++{{ fail (printf "gjallar.config: cannot render %v (%s) as TOML" $v (kindOf $v)) }}
++{{- end -}}
++{{- end }}
++
++{{/* key = value lines of map .m (maps excluded, they become sub-tables) */}}
++{{- define "gjallar.tomlScalars" -}}
++{{- range $k := keys .m | sortAlpha }}
++{{- $v := get $.m $k }}
++{{- if not (or (kindIs "map" $v) (kindIs "invalid" $v)) }}
++{{ include "gjallar.tomlKey" $k }} = {{ include "gjallar.tomlValue" $v }}
++{{- end }}
++{{- end }}
++{{- end }}
++
++{{/* [path.k] sub-tables of map .m, recursively */}}
++{{- define "gjallar.tomlTables" -}}
++{{- range $k := keys .m | sortAlpha }}
++{{- $v := get $.m $k }}
++{{- if kindIs "map" $v }}
++{{- $p := printf "%s%s" $.path (include "gjallar.tomlKey" $k) }}
++
++[{{ $p }}]
++{{- include "gjallar.tomlScalars" (dict "m" $v) }}
++{{- include "gjallar.tomlTables" (dict "m" $v "path" (printf "%s." $p)) }}
++{{- end }}
++{{- end }}
++{{- end }}
++
++{{/*
++The full gjallar.toml: .Values.config plus the fields the chart owns (data dir, listeners, TLS
++paths, API key env).
++*/}}
++{{- define "gjallar.config" -}}
++{{- $c := deepCopy .Values.config }}
++{{- $t := default dict $c.thorchain }}
++{{- $_ := required "gjallar.config.thorchain.rest_url is required (https)" $t.rest_url }}
++{{- $_ := required "gjallar.config.thorchain.rpc_url is required (https)" $t.rpc_url }}
++{{- $_ := required "gjallar.config.thorchain.confirm_url is required (https, a different host from rest_url)" $t.confirm_url }}
++{{- if .Values.thorchainApiKey.secretName }}
++{{- $_ := set $t "api_key_env" "GJALLAR_THORCHAIN_API_KEY" }}
++{{- end }}
++{{- $_ := set $c "thorchain" $t }}
++{{- $s := default dict $c.server }}
++{{- $_ := set $s "bind" (printf "0.0.0.0:%d" (int .Values.service.port)) }}
++{{- $_ := set $s "admin_bind" "127.0.0.1:9443" }}
++{{- $_ := set $s "tls" (dict "cert_path" "/etc/gjallar/tls/tls.crt" "key_path" "/etc/gjallar/tls/tls.key") }}
++{{- $_ := set $c "server" $s }}
++{{- $sources := default list $c.source }}
++{{- $c = omit $c "source" "data_dir" -}}
++data_dir = "/var/lib/gjallar"
++{{- include "gjallar.tomlScalars" (dict "m" $c) }}
++{{- include "gjallar.tomlTables" (dict "m" $c "path" "") }}
++{{- range $sources }}
++
++[[source]]
++{{- $src := . }}
++{{- range $k := keys $src | sortAlpha }}
++{{- $v := get $src $k }}
++{{- if not (kindIs "invalid" $v) }}
++{{ include "gjallar.tomlKey" $k }} = {{ include "gjallar.tomlValue" $v }}
++{{- end }}
++{{- end }}
++{{- end }}
++{{- end }}
+diff --git a/gjallar/templates/configmap.yaml b/gjallar/templates/configmap.yaml
+new file mode 100644
+index 00000000..53b44762
+--- /dev/null
++++ b/gjallar/templates/configmap.yaml
+@@ -0,0 +1,9 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: {{ include "gjallar.fullname" . }}
++  labels:
++    {{- include "gjallar.labels" . | nindent 4 }}
++data:
++  gjallar.toml: |
++    {{- include "gjallar.config" . | nindent 4 }}
+diff --git a/gjallar/templates/deployment.yaml b/gjallar/templates/deployment.yaml
+new file mode 100644
+index 00000000..33e4905e
+--- /dev/null
++++ b/gjallar/templates/deployment.yaml
+@@ -0,0 +1,108 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: {{ include "gjallar.fullname" . }}
++  labels:
++    {{- include "gjallar.labels" . | nindent 4 }}
++spec:
++  replicas: {{ .Values.replicaCount }}
++  strategy:
++    type: Recreate
++  selector:
++    matchLabels:
++      {{- include "gjallar.selectorLabels" . | nindent 6 }}
++  template:
++    metadata:
++      labels:
++        {{- include "gjallar.selectorLabels" . | nindent 8 }}
++      annotations:
++        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
++    spec:
++      automountServiceAccountToken: false
++      serviceAccountName: default
++      {{- with .Values.imagePullSecrets }}
++      imagePullSecrets:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      securityContext:
++        {{- toYaml .Values.podSecurityContext | nindent 8 }}
++      containers:
++        - name: gjallar
++          securityContext:
++            {{- include "gjallar.containerSecurityContext" . | trim | nindent 12 }}
++          image: {{ required "gjallar.image.name is required" .Values.image.name }}:{{ required "gjallar.image.tag is required" .Values.image.tag }}@sha256:{{ required "gjallar.image.hash is required" .Values.image.hash }}
++          imagePullPolicy: IfNotPresent
++          args: ["serve", "/etc/gjallar/gjallar.toml"]
++          {{- if or .Values.thorchainApiKey.secretName .Values.vendorSecret.secretName }}
++          {{- if .Values.thorchainApiKey.secretName }}
++          env:
++            - name: GJALLAR_THORCHAIN_API_KEY
++              valueFrom:
++                secretKeyRef:
++                  name: {{ .Values.thorchainApiKey.secretName }}
++                  key: {{ required "gjallar.thorchainApiKey.secretKey is required with secretName" .Values.thorchainApiKey.secretKey }}
++          {{- end }}
++          {{- with .Values.vendorSecret.secretName }}
++          envFrom:
++            - secretRef:
++                name: {{ . }}
++          {{- end }}
++          {{- end }}
++          ports:
++            - name: https
++              containerPort: {{ .Values.service.port }}
++          # the node listener is TLS + auth only, so probe the socket
++          readinessProbe:
++            tcpSocket:
++              port: https
++            initialDelaySeconds: 5
++            periodSeconds: 10
++          livenessProbe:
++            tcpSocket:
++              port: https
++            initialDelaySeconds: 15
++            periodSeconds: 20
++            failureThreshold: 6
++          resources:
++            {{- toYaml .Values.resources | nindent 12 }}
++          volumeMounts:
++            - name: config
++              mountPath: /etc/gjallar/gjallar.toml
++              subPath: gjallar.toml
++              readOnly: true
++            - name: tls
++              mountPath: /etc/gjallar/tls
++              readOnly: true
++            - name: data
++              mountPath: /var/lib/gjallar
++            - name: tmp
++              mountPath: /tmp
++      volumes:
++        - name: config
++          configMap:
++            name: {{ include "gjallar.fullname" . }}
++        - name: tls
++          secret:
++            secretName: {{ required "gjallar.tls.secretName is required (Gjallar refuses a non-loopback bind without TLS)" .Values.tls.secretName }}
++            defaultMode: 0440
++        - name: data
++        {{- if .Values.persistence.enabled }}
++          persistentVolumeClaim:
++            claimName: {{ .Values.persistence.existingClaim | default (include "gjallar.fullname" .) }}
++        {{- else }}
++          emptyDir: {}
++        {{- end }}
++        - name: tmp
++          emptyDir: {}
++      {{- with .Values.nodeSelector }}
++      nodeSelector:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      {{- with .Values.affinity }}
++      affinity:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      {{- with .Values.tolerations }}
++      tolerations:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
+diff --git a/gjallar/templates/networkpolicy.yaml b/gjallar/templates/networkpolicy.yaml
+new file mode 100644
+index 00000000..6c867e5b
+--- /dev/null
++++ b/gjallar/templates/networkpolicy.yaml
+@@ -0,0 +1,58 @@
++{{- if .Values.networkPolicy.enabled }}
++apiVersion: networking.k8s.io/v1
++kind: NetworkPolicy
++metadata:
++  name: {{ include "gjallar.fullname" . }}
++  labels:
++    {{- include "gjallar.labels" . | nindent 4 }}
++spec:
++  podSelector:
++    matchLabels:
++      {{- include "gjallar.selectorLabels" . | nindent 6 }}
++  policyTypes: ["Ingress", "Egress"]
++  ingress:
++    # bifrost (same namespace and allowedNamespaces) -> screening API
++    - from:
++        - podSelector:
++            matchLabels:
++              {{- toYaml .Values.networkPolicy.bifrostPodLabels | nindent 14 }}
++        {{- range .Values.networkPolicy.allowedNamespaces }}
++        - namespaceSelector:
++            matchLabels:
++              kubernetes.io/metadata.name: {{ . }}
++          podSelector:
++            matchLabels:
++              {{- toYaml $.Values.networkPolicy.bifrostPodLabels | nindent 14 }}
++        {{- end }}
++      ports:
++        - port: {{ .Values.service.port }}
++          protocol: TCP
++  egress:
++    # DNS
++    - to:
++        - namespaceSelector: {}
++          podSelector:
++            matchLabels:
++              k8s-app: kube-dns
++      ports:
++        - port: 53
++          protocol: UDP
++        - port: 53
++          protocol: TCP
++    # THORChain provider, list sources and vendor: public internet over https only
++    - to:
++        - ipBlock:
++            cidr: 0.0.0.0/0
++            except:
++              - 10.0.0.0/8
++              - 172.16.0.0/12
++              - 192.168.0.0/16
++              - 100.64.0.0/10
++              - 169.254.0.0/16
++      ports:
++        - port: 443
++          protocol: TCP
++    {{- with .Values.networkPolicy.extraEgress }}
++    {{- toYaml . | nindent 4 }}
++    {{- end }}
++{{- end }}
+diff --git a/gjallar/templates/pvc.yaml b/gjallar/templates/pvc.yaml
+new file mode 100644
+index 00000000..68f73750
+--- /dev/null
++++ b/gjallar/templates/pvc.yaml
+@@ -0,0 +1,19 @@
++{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
++apiVersion: v1
++kind: PersistentVolumeClaim
++metadata:
++  name: {{ include "gjallar.fullname" . }}
++  labels:
++    {{- include "gjallar.labels" . | nindent 4 }}
++  annotations:
++    helm.sh/resource-policy: keep
++spec:
++  accessModes:
++    - {{ .Values.persistence.accessMode }}
++  resources:
++    requests:
++      storage: {{ .Values.persistence.size }}
++  {{- with .Values.persistence.storageClass }}
++  storageClassName: {{ . }}
++  {{- end }}
++{{- end }}
+diff --git a/gjallar/templates/service.yaml b/gjallar/templates/service.yaml
+new file mode 100644
+index 00000000..1c947689
+--- /dev/null
++++ b/gjallar/templates/service.yaml
+@@ -0,0 +1,15 @@
++apiVersion: v1
++kind: Service
++metadata:
++  name: {{ include "gjallar.fullname" . }}
++  labels:
++    {{- include "gjallar.labels" . | nindent 4 }}
++spec:
++  type: {{ .Values.service.type }}
++  ports:
++    - name: https
++      port: {{ .Values.service.port }}
++      targetPort: https
++      protocol: TCP
++  selector:
++    {{- include "gjallar.selectorLabels" . | nindent 4 }}
+diff --git a/gjallar/values.yaml b/gjallar/values.yaml
+new file mode 100644
+index 00000000..7f12d1e4
+--- /dev/null
++++ b/gjallar/values.yaml
+@@ -0,0 +1,129 @@
++# Gjallar screening proxy for bifrost's opt-in observation filter. Off by default: enable it in
++# thornode-stack with `gjallar.enabled: true` and point bifrost at it with
++# `thornode.bifrost.screening.enabled: true` (needs a bifrost image built with the screening adapter).
++# See README.md in this chart.
++
++nameOverride: ""
++fullnameOverride: ""
++
++# Gjallar keeps its own list, snapshots and vault whitelist in one data dir (SQLite), so it runs as
++# a single pod with a Recreate strategy.
++replicaCount: 1
++
++# There is no official image yet: build one from the Gjallar source and set all three fields.
++image:
++  name: ""
++  tag: ""
++  hash: ""
++
++# TLS is mandatory: Gjallar refuses a non-loopback bind without it. A kubernetes.io/tls Secret
++# (keys tls.crt / tls.key) whose certificate is valid for the service name bifrost dials
++# (default gjallar, gjallar.<namespace>.svc). Give bifrost the issuing CA with
++# thornode.bifrost.screening.caSecret.
++tls:
++  secretName: ""
++
++# Optional Secret with the THORChain API key Gjallar sends to thorchain.rest_url / rpc_url
++# (env GJALLAR_THORCHAIN_API_KEY). Leave empty for endpoints that need no key.
++thorchainApiKey:
++  secretName: ""
++  secretKey: ""
++
++# Optional Secret with the vendor credentials (env names must match vendor.key_env / secret_env).
++vendorSecret:
++  secretName: ""
++
++# gjallar.toml, minus the fields the chart owns (data_dir, server.bind, server.admin_bind,
++# server.tls paths, thorchain.api_key_env). Rendered as TOML; `source` is an array of tables.
++# See config.example.toml and API.md in the Gjallar source for every key.
++config:
++  server:
++    request_deadline_ms: 1500
++    max_vendor_items: 1000
++    max_connections: 64
++    max_connections_per_peer: 32
++    max_tls_handshakes: 64
++    max_tls_handshakes_per_peer: 8
++    http2: false
++    idle_timeout_secs: 60
++    header_read_timeout_secs: 10
++    # cidr: source-IP allowlist (bifrost pod IPs; set the pod CIDR and allow_wide_cidr, and keep
++    # networkPolicy on so only bifrost can reach the port). token: add `tokens` entries
++    # ({principal, sha256, admin}) and give bifrost the token with a bearer source.
++    auth:
++      modes: ["cidr"]
++      allow_wide_cidr: true
++      cidrs: []
++      # - principal: bifrost
++      #   cidr: 10.1.0.0/16
++  thorchain:
++    # THORChain REST / RPC (+ optional websocket) for the vault whitelist. Gjallar requires
++    # https/wss (or loopback), so the in-cluster thornode service does not qualify; use a provider.
++    # confirm_url is the independent cross-check and must be on a different host from rest_url.
++    # Required when the chart is enabled.
++    rest_url: ""
++    rpc_url: ""
++    # ws_url: wss://...
++    confirm_url: ""
++    fresh_blocks: 10
++    backstop_poll_secs: 60
++    confirm_within_secs: 120
++  vendor:
++    kind: none
++  health:
++    strict_health: false
++  source:
++    - id: sdn
++      kind: ofac
++      url: https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV
++      overflow_url: https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN_COMMENTS.CSV
++      redirect_hosts:
++        - wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com
++      hops: 0
++
++service:
++  type: ClusterIP
++  port: 8443
++
++persistence:
++  enabled: true
++  existingClaim: ""
++  size: 5Gi
++  storageClass: ""
++  accessMode: ReadWriteOnce
++
++resources:
++  requests:
++    cpu: "250m"
++    memory: 512Mi
++  limits:
++    memory: 2Gi
++
++# NetworkPolicy (on by default: with cidr auth it is what keeps other pods off the port).
++# Ingress: bifrost (this namespace + allowedNamespaces) -> service.port.
++# Egress: public internet :443 (THORChain provider, list sources, vendor), DNS, and extraEgress.
++networkPolicy:
++  enabled: true
++  bifrostPodLabels:
++    app-name: bifrost
++  allowedNamespaces: []
++  extraEgress: []
++
++podSecurityContext:
++  runAsNonRoot: true
++  runAsUser: 65532
++  runAsGroup: 65532
++  fsGroup: 65532
++securityContext:
++  allowPrivilegeEscalation: false
++  readOnlyRootFilesystem: true
++  capabilities:
++    drop: ["ALL"]
++
++nodeSelector: {}
++
++affinity: {}
++
++tolerations: []
++
++imagePullSecrets: []
+diff --git a/thornode-stack/Chart.lock b/thornode-stack/Chart.lock
+index e6bc7feb..0e276a44 100644
+--- a/thornode-stack/Chart.lock
++++ b/thornode-stack/Chart.lock
+@@ -59,5 +59,8 @@ dependencies:
+ - name: erpc
+   repository: file://../erpc
+   version: 0.2.0
+-digest: sha256:14690928dad586e32ce7572a0910640d7b9904a2ed45660621ec141093b5c185
+-generated: "2026-11-14T13:39:44.261634018-06:00"
++- name: gjallar
++  repository: file://../gjallar
++  version: 0.1.0
++digest: sha256:e0ea5ada3d47a56925853594b41d20c858b299287477f781fed9f916be6778c3
++generated: "2026-11-20T13:26:57.531955781-06:00"
+diff --git a/thornode-stack/Chart.yaml b/thornode-stack/Chart.yaml
+index 9dc97a3e..5988400e 100644
+--- a/thornode-stack/Chart.yaml
++++ b/thornode-stack/Chart.yaml
+@@ -105,3 +105,8 @@ dependencies:
+     repository: file://../erpc
+     version: 0.2.0
+     condition: erpc.enabled
++
++  - name: gjallar
++    repository: file://../gjallar
++    version: 0.1.0
++    condition: gjallar.enabled
+diff --git a/thornode-stack/values.yaml b/thornode-stack/values.yaml
+index 2736355e..c4301e81 100644
+--- a/thornode-stack/values.yaml
++++ b/thornode-stack/values.yaml
+@@ -74,3 +74,9 @@ monero-daemon:
+ erpc:
+   enabled: false
+   fullnameOverride: erpc
++
++# Optional Gjallar screening proxy for bifrost's observation filter (see gjallar/README.md).
++# Also set thornode.bifrost.screening.enabled=true (needs a bifrost image with the screening adapter).
++gjallar:
++  enabled: false
++  fullnameOverride: gjallar
+diff --git a/thornode/templates/cosmosfullnode.yaml b/thornode/templates/cosmosfullnode.yaml
+index 06dd7f23..8c5047dc 100644
+--- a/thornode/templates/cosmosfullnode.yaml
++++ b/thornode/templates/cosmosfullnode.yaml
+@@ -392,6 +392,11 @@ spec:
+               subPath: signer-seed-phrase
+               readOnly: true
+             {{- end }}
++            {{- if and .Values.bifrost.screening.enabled .Values.bifrost.screening.caSecret }}
++            - name: screening-ca
++              mountPath: /etc/bifrost-screening-ca
++              readOnly: true
++            {{- end }}
+           env:
+             - name: EXTERNAL_IP
+               valueFrom:
+@@ -433,14 +438,22 @@ spec:
+             {{- end }}
+             {{- /* bifrost.erpc.enabled: BASE goes through the eRPC proxy and this override wins over env/secretEnv */}}
+             {{- $baseViaErpc := .Values.bifrost.erpc.enabled }}
++            {{- /* bifrost.screening.enabled: these keys come from bifrost.screening and win over env/secretEnv */}}
++            {{- $screening := .Values.bifrost.screening }}
++            {{- $overridden := list }}
++            {{- if $baseViaErpc }}{{ $overridden = append $overridden "BIFROST_CHAINS_BASE_RPC_HOST" }}{{ end }}
++            {{- if $screening.enabled }}
++            {{- $overridden = concat $overridden (list "BIFROST_ADDRESS_FILTER_ENABLED" "BIFROST_ADDRESS_FILTER_FILTER_OUTBOUND" "BIFROST_ADDRESS_FILTER_SOURCES") }}
++            {{- if $screening.caSecret }}{{ $overridden = append $overridden "SSL_CERT_DIR" }}{{ end }}
++            {{- end }}
+             {{- range $key, $value := .Values.bifrost.env }}
+-            {{- if not (and $baseViaErpc (eq $key "BIFROST_CHAINS_BASE_RPC_HOST")) }}
++            {{- if not (has $key $overridden) }}
+             - name: {{ $key }}
+               value: {{ $value | quote }}
+             {{- end }}
+             {{- end }}
+             {{- range $env := .Values.bifrost.secretEnv }}
+-            {{- if not (and $baseViaErpc (eq $env "BIFROST_CHAINS_BASE_RPC_HOST")) }}
++            {{- if not (has $env $overridden) }}
+             - name: {{ $env }}
+               valueFrom:
+                 secretKeyRef:
+@@ -452,6 +465,18 @@ spec:
+             - name: BIFROST_CHAINS_BASE_RPC_HOST
+               value: {{ required "bifrost.erpc.baseRpcHost is required when bifrost.erpc.enabled" .Values.bifrost.erpc.baseRpcHost | quote }}
+             {{- end }}
++            {{- if $screening.enabled }}
++            - name: BIFROST_ADDRESS_FILTER_ENABLED
++              value: "true"
++            - name: BIFROST_ADDRESS_FILTER_FILTER_OUTBOUND
++              value: {{ $screening.filterOutbound | quote }}
++            - name: BIFROST_ADDRESS_FILTER_SOURCES
++              value: {{ required "bifrost.screening.sources is required when bifrost.screening.enabled" $screening.sources | toJson | quote }}
++            {{- if $screening.caSecret }}
++            - name: SSL_CERT_DIR
++              value: /etc/ssl/certs:/etc/bifrost-screening-ca
++            {{- end }}
++            {{- end }}
+           ports:
+             - name: p2p
+               containerPort: {{ .Values.bifrost.service.port.p2p }}
+@@ -496,6 +521,15 @@ spec:
+               - key: mnemonic
+                 path: signer-seed-phrase
+         {{- end }}
++        {{- if and .Values.bifrost.screening.enabled .Values.bifrost.screening.caSecret }}
++        - name: screening-ca
++          secret:
++            secretName: {{ .Values.bifrost.screening.caSecret }}
++            defaultMode: 0444
++            items:
++              - key: ca.crt
++                path: ca.crt
++        {{- end }}
+       {{- with .Values.bifrost.nodeSelector }}
+       nodeSelector:
+         {{- toYaml . | nindent 8 }}
+diff --git a/thornode/values.yaml b/thornode/values.yaml
+index 76a243d2..b374fe47 100644
+--- a/thornode/values.yaml
++++ b/thornode/values.yaml
+@@ -303,6 +303,34 @@ bifrost:
+     enabled: false
+     baseRpcHost: http://erpc:4000/main/evm/8453
+ 
++  # Opt-in observation filter: bifrost skips observing an inbound whose sender a screening source
++  # lists (per-node policy, no consensus change). The default source is the Gjallar screening proxy
++  # (gjallar/ chart, deployed with gjallar.enabled=true in thornode-stack; see gjallar/README.md).
++  # Needs a bifrost image built with the screening adapter; a stock image ignores these keys.
++  # When enabled, BIFROST_ADDRESS_FILTER_ENABLED / _FILTER_OUTBOUND / _SOURCES (and SSL_CERT_DIR
++  # with caSecret) override the same keys in env or secretEnv.
++  screening:
++    enabled: false
++    # also refuse to sign outbounds to a listed destination (expect missed keysigns and jail)
++    filterOutbound: false
++    # Secret with the CA that issued Gjallar's TLS certificate (key ca.crt); mounted at
++    # /etc/bifrost-screening-ca and appended to SSL_CERT_DIR.
++    # trunk-ignore(checkov/CKV_SECRET_6): the name of a Secret, not a secret
++    caSecret: ""
++    # Rendered as JSON into BIFROST_ADDRESS_FILTER_SOURCES, one entry per source (mode static |
++    # list | query). list mode pulls Gjallar's exportable set per chain and refreshes it.
++    sources:
++      - name: gjallar
++        mode: list
++        chains: [BTC, ETH, BSC, AVAX, BASE, LTC, BCH, DOGE, TRON, XRP, ZEC]
++        url: https://gjallar:8443/v1/list/{chain}
++        auth: none
++        listed: .addresses
++        allow_private: true
++        allow_direct_egress: true
++        refresh: 10m
++        max_age: 2h
++
+   # Provisioning the signer does NOT enable XMR in Bifrost or change any mimir.
+   xmrSigner:
+     enabled: false

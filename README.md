@@ -31,3 +31,11 @@ See `thorchain/` for the patch and setup.
 Address list: [maya/fbi-wallet-address-list-maya.txt](maya/fbi-wallet-address-list-maya.txt).
 See `maya/` for the patch and setup.
 
+## Screening (optional)
+
+Dynamic sourced screening via a local Gjallar service, on top of the static filter. Off by default. See [`screening/`](screening/).
+
+| image | tag |
+|---|---|
+| `an0n0p3rat0r/thornode` | `mainnet-3.21.5-filter-screening` |
+| `an0n0p3rat0r/gjallar` | `0.1.0-ca04ded` |
